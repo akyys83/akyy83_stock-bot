@@ -1,5 +1,7 @@
+flask
 yfinance
 pandas
 ta
 requests
 pytz
+gunicorn
