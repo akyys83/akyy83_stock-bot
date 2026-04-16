@@ -13,7 +13,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # =========================
-# 🌐 FLASK SERVER (RENDER)
+# 🌐 FLASK SERVER
 # =========================
 app = Flask(__name__)
 
@@ -36,8 +36,8 @@ CHAT_ID = os.getenv("CHAT_ID")
 # =========================
 active_trades = {}
 cooldowns = {}
-data_cache = {}
 bot_running = True
+ltp_cache = {}
 
 # =========================
 # 🕒 MARKET TIME
@@ -57,7 +57,6 @@ def sleep_until_market_open():
         market_start += timedelta(days=1)
 
     sleep_seconds = (market_start - now).total_seconds()
-    print(f"⏳ Sleeping {int(sleep_seconds/60)} mins")
     time.sleep(max(sleep_seconds, 0))
 
 # =========================
@@ -73,7 +72,7 @@ def send_telegram(msg):
         pass
 
 # =========================
-# 📊 TELEGRAM UI
+# 📊 MENU
 # =========================
 def get_menu():
     return InlineKeyboardMarkup([
@@ -81,84 +80,126 @@ def get_menu():
         [InlineKeyboardButton("▶️ Start", callback_data="start")],
         [InlineKeyboardButton("⏸ Stop", callback_data="stop")],
         [InlineKeyboardButton("📈 Trades", callback_data="trades")],
-        [InlineKeyboardButton("💰 PnL", callback_data="pnl")]
+        [InlineKeyboardButton("💰 PnL (Live)", callback_data="pnl")]
     ])
 
+# =========================
+# 🚀 TELEGRAM START
+# =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 Stock Bot Dashboard", reply_markup=get_menu())
 
 # =========================
-# 💰 LIVE PNL
+# 💰 LTP CACHE
 # =========================
-def calculate_pnl():
-    total = 0
-    msg = ""
+def get_ltp(ticker):
+    try:
+        now = time.time()
 
-    for t, trade in active_trades.items():
-        price = get_ltp(t)
-        entry = trade["entry"]
+        if ticker in ltp_cache:
+            last_time, price = ltp_cache[ticker]
+            if now - last_time < 5:
+                return price
 
-        if trade["type"] == "BUY":
-            pnl = price - entry
-        else:
-            pnl = entry - price
+        df = yf.download(ticker, interval="1m", period="1d", progress=False)
 
-        total += pnl
-        msg += f"{t}: ₹{pnl:.2f}\n"
+        if not df.empty:
+            price = float(df['Close'].iloc[-1])
+            ltp_cache[ticker] = (now, price)
+            return price
 
-    msg += f"\nTOTAL PnL: ₹{total:.2f}"
-    return msg if msg else "No trades"
+    except:
+        pass
+
+    return 0
+
+# =========================
+# 💰 LIVE PNL LOOP
+# =========================
+async def live_pnl(update, context):
+    query = update.callback_query
+
+    while True:
+        msg = ""
+
+        total = 0
+
+        for t, trade in active_trades.items():
+            price = get_ltp(t)
+            entry = trade["entry"]
+
+            pnl = price - entry if trade["type"] == "BUY" else entry - price
+
+            total += pnl
+
+            msg += f"{t}\nEntry: ₹{entry:.2f}\nLTP: ₹{price:.2f}\nPnL: ₹{pnl:.2f}\n\n"
+
+        msg += f"💰 TOTAL: ₹{total:.2f}"
+
+        try:
+            await query.edit_message_text(msg, reply_markup=get_menu())
+            await asyncio.sleep(5)
+        except:
+            break
 
 # =========================
 # 🔘 BUTTON HANDLER
 # =========================
+import asyncio
+
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global bot_running
+
     q = update.callback_query
     await q.answer()
 
     if q.data == "status":
         msg = "🟢 Running" if bot_running else "🔴 Stopped"
+        await q.edit_message_text(msg, reply_markup=get_menu())
 
     elif q.data == "start":
         bot_running = True
-        msg = "▶️ Bot Started"
+        await q.edit_message_text("▶️ Started", reply_markup=get_menu())
 
     elif q.data == "stop":
         bot_running = False
-        msg = "⏸ Bot Stopped"
+        await q.edit_message_text("⏸ Stopped", reply_markup=get_menu())
 
     elif q.data == "trades":
         if not active_trades:
             msg = "No trades"
         else:
             msg = "\n".join([f"{k}: {v['type']}" for k,v in active_trades.items()])
+        await q.edit_message_text(msg, reply_markup=get_menu())
 
     elif q.data == "pnl":
-        msg = calculate_pnl()
+        await live_pnl(update, context)
 
-    await q.edit_message_text(msg, reply_markup=get_menu())
-
+# =========================
+# 🤖 TELEGRAM RUN
+# =========================
 def run_telegram():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button))
-    print("🤖 Telegram started")
-    app.run_polling()
+    try:
+        bot = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+        bot.add_handler(CommandHandler("start", start))
+        bot.add_handler(CallbackQueryHandler(button))
+
+        print("Telegram started")
+
+        bot.run_polling()
+
+    except Exception as e:
+        print("Telegram error:", e)
 
 # =========================
 # 📊 DATA
 # =========================
 def get_data(ticker):
     try:
-        df = yf.download(ticker, interval="5m", period="1d", progress=False)
-        return df
+        return yf.download(ticker, interval="5m", period="1d", progress=False)
     except:
         return pd.DataFrame()
-
-def get_ltp(ticker):
-    df = get_data(ticker)
-    return float(df['Close'].iloc[-1]) if not df.empty else 0
 
 # =========================
 # 🚀 STOCK LIST
@@ -170,7 +211,7 @@ stocks = [
 ]
 
 # =========================
-# 📊 STRATEGY (FIXED)
+# 📊 STRATEGY
 # =========================
 def analyze(ticker):
     try:
@@ -194,23 +235,16 @@ def analyze(ticker):
 
         signal = None
 
-        # ✅ NEW SMART CONDITIONS
         if price > sma20 and sma20 > sma50 and rsi > 50:
             signal = "BUY"
-
         elif price < sma20 and sma20 < sma50 and rsi < 50:
             signal = "SELL"
 
         if ticker not in active_trades and signal:
-            active_trades[ticker] = {
-                "type": signal,
-                "entry": price
-            }
-
+            active_trades[ticker] = {"type": signal, "entry": price}
             send_telegram(f"{signal} {ticker} @ ₹{price:.2f}")
             cooldowns[ticker] = time.time()
 
-        # EXIT LOGIC
         if ticker in active_trades:
             trade = active_trades[ticker]
 
@@ -221,8 +255,6 @@ def analyze(ticker):
             elif trade["type"] == "SELL" and price > sma20:
                 send_telegram(f"EXIT SELL {ticker} @ ₹{price:.2f}")
                 del active_trades[ticker]
-
-        print(ticker, signal, price)
 
     except Exception as e:
         print("Error:", ticker, e)
