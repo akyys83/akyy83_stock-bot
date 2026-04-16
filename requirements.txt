@@ -5,4 +5,5 @@ ta
 requests
 pytz
 gunicorn
+matplotlib
 python-telegram-bot==20.7

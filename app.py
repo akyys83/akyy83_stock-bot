@@ -8,12 +8,13 @@ import pytz
 import os
 from flask import Flask
 import threading
+import matplotlib.pyplot as plt
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # =========================
-# 🌐 FLASK SERVER
+# 🌐 FLASK SERVER (RENDER)
 # =========================
 app = Flask(__name__)
 
@@ -37,7 +38,9 @@ CHAT_ID = os.getenv("CHAT_ID")
 active_trades = {}
 cooldowns = {}
 bot_running = True
-ltp_cache = {}
+
+dashboard_message_id = None
+dashboard_chat_id = None
 
 # =========================
 # 🕒 MARKET TIME
@@ -72,98 +75,130 @@ def send_telegram(msg):
         pass
 
 # =========================
-# 📊 MENU
+# 📊 TELEGRAM UI
 # =========================
 def get_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Status", callback_data="status")],
-        [InlineKeyboardButton("▶️ Start", callback_data="start")],
-        [InlineKeyboardButton("⏸ Stop", callback_data="stop")],
-        [InlineKeyboardButton("📈 Trades", callback_data="trades")],
-        [InlineKeyboardButton("💰 PnL (Live)", callback_data="pnl")]
+        [
+            InlineKeyboardButton("📊 Dashboard", callback_data="dashboard"),
+            InlineKeyboardButton("💰 PnL", callback_data="pnl")
+        ],
+        [
+            InlineKeyboardButton("📈 Trades", callback_data="trades"),
+            InlineKeyboardButton("📉 Chart", callback_data="chart")
+        ],
+        [
+            InlineKeyboardButton("▶️ Start", callback_data="start"),
+            InlineKeyboardButton("⏸ Stop", callback_data="stop")
+        ]
     ])
 
 # =========================
-# 🚀 TELEGRAM START
+# 📊 DASHBOARD BUILDER
+# =========================
+def build_dashboard():
+    msg = "📊 LIVE DASHBOARD\n\n"
+
+    msg += "Status: 🟢 Running\n" if bot_running else "Status: 🔴 Stopped\n"
+
+    total = 0
+
+    for t, trade in active_trades.items():
+        price = get_ltp(t)
+        entry = trade["entry"]
+
+        pnl = price - entry if trade["type"] == "BUY" else entry - price
+        total += pnl
+
+        msg += f"{t} | {trade['type']} | ₹{pnl:.2f}\n"
+
+    msg += f"\n💰 Total PnL: ₹{total:.2f}"
+
+    return msg if active_trades else msg + "\n\nNo active trades"
+
+# =========================
+# 💰 PNL CALC
+# =========================
+def calculate_pnl():
+    total = 0
+    msg = ""
+
+    for t, trade in active_trades.items():
+        price = get_ltp(t)
+        entry = trade["entry"]
+
+        pnl = price - entry if trade["type"] == "BUY" else entry - price
+        total += pnl
+
+        msg += f"{t}: ₹{pnl:.2f}\n"
+
+    msg += f"\nTOTAL: ₹{total:.2f}"
+    return msg if msg else "No trades"
+
+# =========================
+# 🔁 AUTO REFRESH
+# =========================
+async def auto_refresh(context: ContextTypes.DEFAULT_TYPE):
+    global dashboard_message_id, dashboard_chat_id
+
+    if not dashboard_message_id:
+        return
+
+    try:
+        text = build_dashboard()
+
+        await context.bot.edit_message_text(
+            chat_id=dashboard_chat_id,
+            message_id=dashboard_message_id,
+            text=text,
+            reply_markup=get_menu()
+        )
+    except Exception as e:
+        print("Refresh error:", e)
+
+# =========================
+# 📉 CHART
+# =========================
+def generate_chart(ticker):
+    df = yf.download(ticker, interval="5m", period="1d", progress=False)
+
+    if df.empty:
+        return None
+
+    plt.figure()
+    plt.plot(df['Close'])
+    plt.title(ticker)
+
+    file = f"{ticker}.png"
+    plt.savefig(file)
+    plt.close()
+
+    return file
+
+# =========================
+# 🤖 TELEGRAM COMMANDS
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 Stock Bot Dashboard", reply_markup=get_menu())
 
 # =========================
-# 💰 LTP CACHE
-# =========================
-def get_ltp(ticker):
-    try:
-        now = time.time()
-
-        if ticker in ltp_cache:
-            last_time, price = ltp_cache[ticker]
-            if now - last_time < 5:
-                return price
-
-        df = yf.download(ticker, interval="1m", period="1d", progress=False)
-
-        if not df.empty:
-            price = float(df['Close'].iloc[-1])
-            ltp_cache[ticker] = (now, price)
-            return price
-
-    except:
-        pass
-
-    return 0
-
-# =========================
-# 💰 LIVE PNL LOOP
-# =========================
-async def live_pnl(update, context):
-    query = update.callback_query
-
-    while True:
-        msg = ""
-
-        total = 0
-
-        for t, trade in active_trades.items():
-            price = get_ltp(t)
-            entry = trade["entry"]
-
-            pnl = price - entry if trade["type"] == "BUY" else entry - price
-
-            total += pnl
-
-            msg += f"{t}\nEntry: ₹{entry:.2f}\nLTP: ₹{price:.2f}\nPnL: ₹{pnl:.2f}\n\n"
-
-        msg += f"💰 TOTAL: ₹{total:.2f}"
-
-        try:
-            await query.edit_message_text(msg, reply_markup=get_menu())
-            await asyncio.sleep(5)
-        except:
-            break
-
-# =========================
 # 🔘 BUTTON HANDLER
 # =========================
-import asyncio
-
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global bot_running
+    global bot_running, dashboard_message_id, dashboard_chat_id
 
     q = update.callback_query
     await q.answer()
 
-    if q.data == "status":
-        msg = "🟢 Running" if bot_running else "🔴 Stopped"
-        await q.edit_message_text(msg, reply_markup=get_menu())
+    if q.data == "dashboard":
+        msg = build_dashboard()
+        sent = await q.message.reply_text(msg, reply_markup=get_menu())
 
-    elif q.data == "start":
-        bot_running = True
-        await q.edit_message_text("▶️ Started", reply_markup=get_menu())
+        dashboard_message_id = sent.message_id
+        dashboard_chat_id = sent.chat_id
 
-    elif q.data == "stop":
-        bot_running = False
-        await q.edit_message_text("⏸ Stopped", reply_markup=get_menu())
+    elif q.data == "pnl":
+        await q.edit_message_text(calculate_pnl(), reply_markup=get_menu())
 
     elif q.data == "trades":
         if not active_trades:
@@ -172,38 +207,46 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = "\n".join([f"{k}: {v['type']}" for k,v in active_trades.items()])
         await q.edit_message_text(msg, reply_markup=get_menu())
 
-    elif q.data == "pnl":
-        await live_pnl(update, context)
+    elif q.data == "chart":
+        if not active_trades:
+            await q.edit_message_text("No active trades", reply_markup=get_menu())
+            return
+
+        ticker = list(active_trades.keys())[0]
+        file = generate_chart(ticker)
+
+        if file:
+            await context.bot.send_photo(chat_id=q.message.chat_id, photo=open(file, 'rb'))
+
+    elif q.data == "start":
+        bot_running = True
+        await q.edit_message_text("▶️ Bot Started", reply_markup=get_menu())
+
+    elif q.data == "stop":
+        bot_running = False
+        await q.edit_message_text("⏸ Bot Stopped", reply_markup=get_menu())
 
 # =========================
 # 🤖 TELEGRAM RUN
 # =========================
 def run_telegram():
-    import asyncio
-
     try:
         print("🚀 Starting Telegram...")
 
-        if not TELEGRAM_TOKEN:
-            print("❌ TELEGRAM_TOKEN missing")
-            return
+        application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-        async def start_bot():
-            app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CallbackQueryHandler(button))
 
-            app.add_handler(CommandHandler("start", start))
-            app.add_handler(CallbackQueryHandler(button))
+        # 🔁 Auto refresh every 10 sec
+        application.job_queue.run_repeating(auto_refresh, interval=10, first=5)
 
-            print("✅ Telegram started")
+        print("🤖 Telegram bot started...")
 
-            await app.initialize()
-            await app.start()
-            await app.updater.start_polling()
-
-        asyncio.run(start_bot())
+        application.run_polling()
 
     except Exception as e:
-        print("❌ Telegram crashed:", e)
+        print("Telegram crashed:", e)
 
 # =========================
 # 📊 DATA
@@ -214,13 +257,16 @@ def get_data(ticker):
     except:
         return pd.DataFrame()
 
+def get_ltp(ticker):
+    df = get_data(ticker)
+    return float(df['Close'].iloc[-1]) if not df.empty else 0
+
 # =========================
-# 🚀 STOCK LIST
+# 🚀 STOCKS
 # =========================
 stocks = [
-    "RELIANCE.NS", "TCS.NS", "INFY.NS",
-    "HDFCBANK.NS", "ICICIBANK.NS",
-    "SBIN.NS", "ITC.NS"
+    "RELIANCE.NS","TCS.NS","INFY.NS",
+    "HDFCBANK.NS","ICICIBANK.NS","SBIN.NS","ITC.NS"
 ]
 
 # =========================
@@ -254,7 +300,10 @@ def analyze(ticker):
             signal = "SELL"
 
         if ticker not in active_trades and signal:
-            active_trades[ticker] = {"type": signal, "entry": price}
+            active_trades[ticker] = {
+                "type": signal,
+                "entry": price
+            }
             send_telegram(f"{signal} {ticker} @ ₹{price:.2f}")
             cooldowns[ticker] = time.time()
 
@@ -273,7 +322,7 @@ def analyze(ticker):
         print("Error:", ticker, e)
 
 # =========================
-# 🔁 BOT LOOP
+# 🔁 LOOP
 # =========================
 def run_bot():
     global bot_running
@@ -286,8 +335,6 @@ def run_bot():
 
             if not is_market_open():
                 sleep_until_market_open()
-
-            print("Scanning...")
 
             for s in stocks:
                 analyze(s)
