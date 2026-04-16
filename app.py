@@ -180,17 +180,23 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 def run_telegram():
     try:
+        print("🚀 Starting Telegram...")
+
+        if not TELEGRAM_TOKEN:
+            print("❌ TELEGRAM_TOKEN missing")
+            return
+
         bot = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
         bot.add_handler(CommandHandler("start", start))
         bot.add_handler(CallbackQueryHandler(button))
 
-        print("Telegram started")
+        print("✅ Telegram started")
 
         bot.run_polling()
 
     except Exception as e:
-        print("Telegram error:", e)
+        print("❌ Telegram crashed:", e)
 
 # =========================
 # 📊 DATA
