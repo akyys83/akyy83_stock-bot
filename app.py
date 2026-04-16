@@ -233,20 +233,24 @@ def run_telegram():
     try:
         print("🚀 Starting Telegram...")
 
-        application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+        import asyncio
 
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CallbackQueryHandler(button))
+        async def main():
+            application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-        # 🔁 Auto refresh every 10 sec
-        application.job_queue.run_repeating(auto_refresh, interval=10, first=5)
+            application.add_handler(CommandHandler("start", start))
+            application.add_handler(CallbackQueryHandler(button))
 
-        print("🤖 Telegram bot started...")
+            application.job_queue.run_repeating(auto_refresh, interval=10, first=5)
 
-        application.run_polling()
+            print("🤖 Telegram bot started...")
+
+            await application.run_polling()
+
+        asyncio.run(main())
 
     except Exception as e:
-        print("Telegram crashed:", e)
+        print("❌ Telegram crashed:", e)
 
 # =========================
 # 📊 DATA
