@@ -267,8 +267,12 @@ def run_bot():
 # 🚀 START
 # =========================
 if __name__ == "__main__":
+    # Start bot in background
     t1 = threading.Thread(target=run_bot)
     t1.daemon = True
     t1.start()
 
+    print("🚀 Bot + Server started")
+
+    # Start Flask (required for Render)
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
