@@ -5,11 +5,26 @@ import time
 import requests
 from datetime import datetime, time as dt_time, timedelta
 import pytz
+import os
 
-# 🔑 ADD YOUR DETAILS
-TELEGRAM_TOKEN = "8331695862:AAGoGIVDY95PncAZXswx3HRcVRrOfRBVR8g"
-CHAT_ID = "6368208787"
+from flask import Flask
+import threading
 
+# 🌐 Web server (for Render)
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Stock bot running 🚀"
+
+def run_web():
+    app.run(host='0.0.0.0', port=10000)
+
+# 🔑 ENV VARIABLES
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+
+# 🧠 STORAGE
 last_signals = {}
 active_trades = {}
 
@@ -18,10 +33,7 @@ def is_market_open():
     ist = pytz.timezone("Asia/Kolkata")
     now = datetime.now(ist)
 
-    market_start = dt_time(9, 15)
-    market_end = dt_time(15, 30)
-
-    return market_start <= now.time() <= market_end
+    return dt_time(9, 15) <= now.time() <= dt_time(15, 30)
 
 
 def sleep_until_market_open():
@@ -38,20 +50,18 @@ def sleep_until_market_open():
         return
 
     sleep_seconds = (next_open - now).total_seconds()
-
-    print("⏳ Sleeping until 9:15 AM IST...")
+    print(f"⏳ Sleeping until market opens ({int(sleep_seconds/60)} mins)")
     time.sleep(sleep_seconds)
-
 
 # 📲 TELEGRAM
 def send_telegram(message):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         data = {"chat_id": CHAT_ID, "text": message}
-        requests.post(url, data=data)
+        res = requests.post(url, data=data)
+        print("📩 Telegram:", res.text)
     except Exception as e:
         print("Telegram Error:", e)
-
 
 # 🧠 FUNDAMENTAL FILTER
 def is_good_stock(ticker):
@@ -59,19 +69,16 @@ def is_good_stock(ticker):
         stock = yf.Ticker(ticker)
         info = stock.info
 
-        pe = info.get("trailingPE", None)
-        roe = info.get("returnOnEquity", None)
-        debt = info.get("debtToEquity", None)
+        pe = info.get("trailingPE")
+        roe = info.get("returnOnEquity")
 
-        # Simple safety rules
-        if pe and pe < 30 and roe and roe > 0.15:
-            return True
+        if pe and roe:
+            return pe < 30 and roe > 0.15
 
     except:
         pass
 
     return False
-
 
 # 🚀 AUTO STOCK PICKER
 def get_active_stocks():
@@ -86,7 +93,7 @@ def get_active_stocks():
         try:
             df = yf.download(stock, interval="5m", period="1d")
 
-            if df.empty:
+            if df.empty or len(df) < 30:
                 continue
 
             price_change = df['Close'].iloc[-1] - df['Close'].iloc[-5]
@@ -101,25 +108,22 @@ def get_active_stocks():
 
     return selected
 
-
 # 📊 STRATEGY
 def analyze_stock(ticker):
     try:
-        # 🔴 Skip weak companies
         if not is_good_stock(ticker):
-            print(f"{ticker} ❌ Weak fundamentals - Skipped")
+            print(f"{ticker} ❌ Weak fundamentals")
             return
 
         df = yf.download(ticker, interval="5m", period="1d")
 
-        if df.empty:
+        if df.empty or len(df) < 50:
             return
 
         close = df['Close'].squeeze()
         volume = df['Volume'].squeeze()
 
         df['SMA_20'] = ta.trend.sma_indicator(close, 20)
-        df['SMA_50'] = ta.trend.sma_indicator(close, 50)
         df['RSI'] = ta.momentum.rsi(close, 14)
         df['VOL_AVG'] = volume.rolling(20).mean()
 
@@ -147,22 +151,14 @@ def analyze_stock(ticker):
         if ticker not in active_trades:
 
             if signal == "BUY":
-                active_trades[ticker] = {
-                    "type": "BUY",
-                    "sl": price - 10,
-                    "highest": price
-                }
-                send_telegram(f"🚨 BUY {ticker} @ {price:.2f}")
+                active_trades[ticker] = {"type": "BUY", "sl": price - 10, "highest": price}
+                send_telegram(f"🚀 BUY {ticker} @ {price:.2f}")
 
             elif signal == "SELL":
-                active_trades[ticker] = {
-                    "type": "SELL",
-                    "sl": price + 10,
-                    "lowest": price
-                }
-                send_telegram(f"🚨 SELL {ticker} @ {price:.2f}")
+                active_trades[ticker] = {"type": "SELL", "sl": price + 10, "lowest": price}
+                send_telegram(f"🔻 SELL {ticker} @ {price:.2f}")
 
-        # 🔄 TRAILING
+        # 🔄 TRAILING STOPLOSS
         if ticker in active_trades:
             trade = active_trades[ticker]
 
@@ -184,24 +180,34 @@ def analyze_stock(ticker):
                     send_telegram(f"❌ EXIT SELL {ticker} @ {price:.2f}")
                     del active_trades[ticker]
 
-        print(f"{ticker} | {signal} | Price: {price:.2f}")
+        print(f"{ticker} | {signal} | ₹{price:.2f} | RSI {rsi:.1f}")
 
     except Exception as e:
-        print("Error:", e)
+        print(f"{ticker} ERROR:", e)
 
+# 🔁 MAIN BOT LOOP
+def run_bot():
+    while True:
+        try:
+            if not is_market_open():
+                sleep_until_market_open()
 
-# 🔁 MAIN LOOP
-while True:
+            print("\n🔄 Scanning market...\n")
 
-    if not is_market_open():
-        sleep_until_market_open()
+            stocks = get_active_stocks()
+            print("🔥 Active stocks:", stocks)
 
-    print("\n🔄 Scanning...\n")
+            for stock in stocks:
+                analyze_stock(stock)
 
-    stocks = get_active_stocks()
-    print("🔥 Active:", stocks)
+            print("\n⏳ Waiting 60 seconds...\n")
+            time.sleep(60)
 
-    for stock in stocks:
-        analyze_stock(stock)
+        except Exception as e:
+            print("MAIN LOOP ERROR:", e)
+            time.sleep(10)
 
-    time.sleep(60)
+# 🚀 START EVERYTHING
+if __name__ == "__main__":
+    threading.Thread(target=run_web).start()
+    run_bot()
